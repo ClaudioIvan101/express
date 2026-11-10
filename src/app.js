@@ -19,193 +19,200 @@ const incidentes = [
 ];
 
 const despachos = [];
+const sectores = ["Norte", "Sur", "Este", "Oeste"];
+const estados = ["pendiente", "en-curso", "resuelto"];
 
-const sectores = ["Norte", "Sur", "Este", "Oeste"]
-const estados = ["pendiente", "en-curso", "resuelto"]
-// Clase de error para evitar escribir "err.status = 404", etc
+// Clase de error personalizada
 class ErrorUniversal extends Error {
   constructor(message, status) {
     super(message);
-    this.status = status
+    this.status = status;
   }
 }
-// Middleware para comprobar campos
-const verificarCampos = (req, res, next)=> { 
-  const titulo = req.body.titulo
-  const sector = req.body.sector
-  const prioridad = Number(req.body.prioridad)
-  if (!titulo || !sector || !prioridad) {
-    throw new ErrorUniversal("Todos los campos son obligatorios", 400)
+
+// Middleware para comprobar campos obligatorios en incidentes
+const verificarCampos = (req, res, next) => {
+  const { titulo, sector } = req.body;
+  const prioridad = Number(req.body.prioridad);
+
+  if (!titulo || !sector || req.body.prioridad === undefined) {
+    return next(new ErrorUniversal("Todos los campos son obligatorios", 400));
   }
-  if (typeof titulo != "string" || titulo.trim().length < 3 || titulo.trim().length > 80) {
-    throw new ErrorUniversal("Titulo debe ser un string de 3 a 80 caracteres", 422)
+  if (typeof titulo !== "string" || titulo.trim().length < 3 || titulo.trim().length > 80) {
+    return next(new ErrorUniversal("Título debe ser un string de 3 a 80 caracteres", 422));
   }
-  const sectorBuscado = sectores.filter(s => s.toLocaleLowerCase() === sector.toLowerCase())
-  if (sectorBuscado.length === 0) {
-    throw new ErrorUniversal("Sector no encontrado", 404)
+  
+  const sectorEncontrado = sectores.some(s => s.toLowerCase() === sector.toLowerCase());
+  if (!sectorEncontrado) {
+    return next(new ErrorUniversal("Sector no encontrado", 404));
   }
-  if (!(Number.isFinite(prioridad) || prioridad < 1 || prioridad > 5)) {
-    throw new ErrorUniversal("Prioridad debe ser un numero entre 1 y 5", 422)
+
+  if (!Number.isFinite(prioridad) || prioridad < 1 || prioridad > 5) {
+    return next(new ErrorUniversal("Prioridad debe ser un número entre 1 y 5", 422));
   }
-  next()
-}
-///PARTE 1: Gestion de indicentes//
-// Consultar indicente
-app.get("/incidentes/:id", (req, res) => {
-  const id = Number(req.params.id)
+
+  next();
+};
+
+/// PARTE 1: Gestión de incidentes
+
+// Consultar incidente por ID
+app.get("/incidentes/:id", (req, res, next) => {
+  const id = Number(req.params.id);
   if (isNaN(id) || !Number.isInteger(id)) {
-    throw new ErrorUniversal("El ID debe ser un número entero válido.", 400)
+    return next(new ErrorUniversal("El ID debe ser un número entero válido.", 400));
   }
-  const incidente = incidentes.find(i => i.id === id)
+  
+  const incidente = incidentes.find(i => i.id === id);
   if (!incidente) {
-    throw new ErrorUniversal("El indicente no existe", 404)
+    return next(new ErrorUniversal("El incidente no existe", 404));
   }
-  // Generamos el ETag actual
-  const etag = () => `"v${incidente.version}"`;
-  res.set("ETag", etag());
+
+  const etag = `"v${incidente.version}"`;
+  res.set("ETag", etag);
   res.status(200).json({ 
-    incidente: incidente,
-    etag: etag()
-  })
-})
+    incidente,
+    etag 
+  });
+});
+
 // Registrar un incidente
-app.post("/incidentes", verificarCampos,(req, res) => {
-  const titulo = req.body.titulo
-  const sector = req.body.sector
-  const prioridad = Number(req.body.prioridad)
+app.post("/incidentes", verificarCampos, (req, res) => {
+  const { titulo, sector } = req.body;
+  const prioridad = Number(req.body.prioridad);
+
+  const nuevoId = incidentes.length > 0 ? Math.max(...incidentes.map(i => i.id)) + 1 : 1;
+
   const incidente = {
-    id: sectores.length + 1,
-    titulo: titulo,
-    sector: sector,
-    prioridad: prioridad,
+    id: nuevoId,
+    titulo: titulo.trim(),
+    sector,
+    prioridad,
     estado: "pendiente",
     version: 1
-  }
-  res.status(201).json(incidente)
-})
-// Modificar incidente
-app.put("/incidentes/:id",verificarCampos, (req, res) => {
+  };
+
+  incidentes.push(incidente);
+  res.status(201).json(incidente);
+});
+
+// Modificar incidente (Concurrencia Optimista con ETag / If-Match)
+app.put("/incidentes/:id", verificarCampos, (req, res, next) => {
   const condicion = req.get("If-Match");
-  // No envió una versión
   if (!condicion) {
-    return res.status(428).json({
-      error: "Debés enviar If-Match"
-    });
+    return res.status(428).json({ error: "Debés enviar el header If-Match" });
   }
-  const id = Number(req.params.id)
-  const nuevoEstado = req.body.estado;
+
+  const id = Number(req.params.id);
   if (isNaN(id) || !Number.isInteger(id)) {
-    throw new ErrorUniversal("El ID debe ser un número entero válido.", 400)
+    return next(new ErrorUniversal("El ID debe ser un número entero válido.", 400));
   }
-  const incidente = incidentes.find(i => i.id === id)
-  let version = incidente.version
-  // Generamos el ETag actual
-  const etag = () => `"v${version}"`;
-    // La versión no coincide
-  if (condicion !== etag()) {
+
+  const incidente = incidentes.find(i => i.id === id);
+  if (!incidente) {
+    return next(new ErrorUniversal("El incidente no existe", 404));
+  }
+
+  const etagActual = `"v${incidente.version}"`;
+  if (condicion !== etagActual) {
     return res.status(412).json({
-      error: "El recurso fue modificado",
-      versionActual: etag()
+      error: "El recurso fue modificado por otro usuario",
+      versionActual: etagActual
     });
   }
-  if (!incidente) {
-    throw new ErrorUniversal("El incidente no existe", 404)
+
+  const nuevoEstado = req.body.estado || incidente.estado;
+  if (!estados.includes(nuevoEstado)) {
+    return next(new ErrorUniversal("Estado no permitido", 422));
   }
-  if(!(estados.some(e=> e.estado === nuevoEstado))) { 
-    throw new ErrorUniversal("Estado no permitido", 442)
-  }
-  res.set("ETag", etag());
-  version++; 
+
+  const index = incidentes.findIndex(i => i.id === id);
+  
   const incidenteModificado = {
     ...incidente,
     ...req.body,
     estado: nuevoEstado,
-    version: version
+    version: incidente.version + 1
   };
-  const index = incidentes.findIndex(i => i.id === id);
+
   incidentes[index] = incidenteModificado;
+  
+  res.set("ETag", `"v${incidenteModificado.version}"`);
   return res.status(200).json(incidenteModificado);
-})
+});
+
+/// PARTE 2: Gestión de Despachos e Idempotencia
 const operaciones = new Map();
-const verificarClave = (req, res, next)=> { 
-  const IdempotencyKey = req.get("Idempotency-Key")
-    if(!IdempotencyKey) { 
-    throw new ErrorUniversal("Debe incluir Idempotency-Key", 400)
-  }
-}
-function crearDespacho(clave, incidenteId, dron) {
-  const despachoExistente =operaciones.get(clave)
-  if(despachoExistente) { 
-    if(incidenteId === despachoExistente.incidenteId) { 
-     return {
-      status: 201, 
-      despacho: despachoExistente
-     }
+
+function procesarDespacho(clave, incidenteId, dron) {
+  const despachoExistente = operaciones.get(clave);
+  
+  if (despachoExistente) {
+    if (incidenteId === despachoExistente.incidenteId && dron === despachoExistente.dron) {
+      return { status: 200, data: despachoExistente };
     }
-    return {
-    status: 409,
-    mensaje: "El dron proporcionado es diferente"
-  };
-  }
-  if (operaciones.has(clave)) {
-    return operaciones.get(clave);
+    return { status: 409, data: { error: "La clave de idempotencia ya fue usada con parámetros diferentes." } };
   }
    
   const despacho = {
-    incidenteId: incidenteId, 
-    dron: dron,
-    id: despachos.length + 1, 
+    id: despachos.length + 1,
+    incidenteId, 
+    dron, 
     estado: "Despachado"
   };
 
   operaciones.set(clave, despacho);
   despachos.push(despacho);
 
-  return despacho;
+  return { status: 201, data: despacho };
 }
+
 function verificarClave(req, res, next) {
   const key = req.get("Idempotency-Key");
-
   if (!key) {
-    return res.status(400).json({
-      error: "Falta Idempotency-Key"
-    });
+    return next(new ErrorUniversal("Falta Idempotency-Key en los headers", 400));
   }
-
   res.locals.key = key;
   next();
 }
-// registrar despacho
-app.post("/despacho",verificarClave, (req, res)=> { 
-  const incidenteId = Number(req.body.incidenteId)
-  const key = res.locals.key
-  const dron = req.body.dron
-  if(!Number.isInteger(incidenteId) || incidenteId <= 0) { 
-    throw new ErrorUniversal("El id debe ser un entero positivo", 400)
-  }
-  const incidente = incidentes.find(i=> i.id === incidenteId)
-  if(!incidente) { 
-     throw new ErrorUniversal("El incidente no existe", 404)
-  }
-  if(typeof dron != "string" || dron.length < 1) { 
-     throw new ErrorUniversal("Dron debe ser texto no vacio", 400)
-  }
-  if(incidente.estado === "resuelto") {
-    throw new ErrorUniversal("El incidente no puede estar resuelto", 400)
-   }
-   const despacho = crearDespacho(key, incidenteId, dron)
-   res.status(201).json(despacho)
-})
 
-// handler error para centralizar errores
+// Registrar despacho
+app.post("/despacho", verificarClave, (req, res, next) => {
+  const incidenteId = Number(req.body.incidenteId);
+  const key = res.locals.key;
+  const dron = req.body.dron;
+
+  if (!Number.isInteger(incidenteId) || incidenteId <= 0) {
+    return next(new ErrorUniversal("El id del incidente debe ser un entero positivo", 400));
+  }
+
+  const incidente = incidentes.find(i => i.id === incidenteId);
+  if (!incidente) {
+    return next(new ErrorUniversal("El incidente no existe", 404));
+  }
+
+  if (typeof dron !== "string" || dron.trim().length === 0) {
+    return next(new ErrorUniversal("Dron debe ser un texto no vacío", 400));
+  }
+
+  if (incidente.estado === "resuelto") {
+    return next(new ErrorUniversal("El incidente no puede estar resuelto para recibir un despacho", 400));
+  }
+
+  const resultado = procesarDespacho(key, incidenteId, dron.trim());
+  return res.status(resultado.status).json(resultado.data);
+});
+
+// Middleware centralizado de manejo de errores
 app.use((err, req, res, next) => {
-  const status = err.status || 500
-  const title = status === 500 ? "Error interno del servidor" : err.message
+  const status = err.status || 500;
+  const title = status === 500 ? "Error interno del servidor" : err.message;
   res.status(status).json({
     title: title,
     status: status
-  })
-})
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`ARGOS operativo en http://localhost:${PORT}`);
 });
